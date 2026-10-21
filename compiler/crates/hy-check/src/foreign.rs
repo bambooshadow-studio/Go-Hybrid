@@ -121,15 +121,18 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
-            CallMode::Produce
-        }
+        ("serde_json", "parse")
+        | ("serde_json", "new_object")
+        | ("serde_json", "new_array")
+        | ("flate2", "new_writer") => CallMode::Produce,
         ("serde_json", "to_string_pretty")
         | ("serde_json", "array")
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("serde_json", "set") | ("serde_json", "remove") | ("serde_json", "push_string") => {
+            CallMode::Mutate
+        }
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -151,14 +154,41 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
             "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
         ) => Some(1),
         ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+        ("serde_json", "set" | "remove" | "push_string") => Some(0),
+        ("flate2", "write") => Some(0),
+        ("hex", "decode" | "Decode") => Some(0),
+        ("json", "unmarshal" | "Unmarshal") => Some(1),
+        ("json", "compact" | "Compact" | "html_escape" | "HTMLEscape" | "indent" | "Indent") => {
+            Some(0)
+        }
+        ("errors", "as" | "As") => Some(1),
+        ("fmt", "scan" | "scanln" | "Scan" | "Scanln") => Some(0),
+        (
+            "fmt",
+            "scanf" | "sscan" | "sscanln" | "fscan" | "fscanln" | "Scanf" | "Sscan" | "Sscanln"
+            | "Fscan" | "Fscanln",
+        ) => Some(1),
+        ("fmt", "sscanf" | "fscanf" | "Sscanf" | "Fscanf") => Some(2),
+        _ if pkg == "atomic" && is_atomic_mutator(method) => Some(0),
         _ => None,
     }
+}
+
+/// `sync/atomic` write operations (snake_case and Go-style names). These
+/// mutate their first argument in place, so a `const` root there is a write.
+fn is_atomic_mutator(method: &str) -> bool {
+    ["store_", "add_", "swap_", "compare_and_swap_"]
+        .iter()
+        .any(|prefix| method.starts_with(prefix))
+        || ["Store", "Add", "Swap", "CompareAndSwap"]
+            .iter()
+            .any(|prefix| method.starts_with(prefix))
 }
 
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") => {
+        ("serde_json", "parse") | ("serde_json", "new_object") | ("serde_json", "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
@@ -177,7 +207,10 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
+        (
+            "atomic",
+            "load_pointer" | "swap_pointer" | "load_value" | "swap_value" | "pointer" | "value",
+        ) => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
@@ -315,7 +348,9 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
             "serde_json.value" | "serde_json.view",
             "array" | "get" | "int" | "string" | "to_string_pretty",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set" | "remove" | "push_string") => {
+            CallMode::Mutate
+        }
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
